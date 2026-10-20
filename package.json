@@ -1,0 +1,39 @@
+{
+  "name": "dsh-office-audit",
+  "version": "0.2.0",
+  "description": "Financial-model and workbook auditor for DeepSeek Harness: one office_audit tool that recalculates formulas with the bundled LibreOffice Kit and then runs static checks over the recalculated values — formula errors, broken references, formula-consistency, hardcoded constants, number-format and unit mismatches, balance-sheet balance, retained-earnings roll-forward, cash tie-out, cash-flow subtotals, ratio-table conventions and data-cleaning issues. Read-only; the source workbook is never modified.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "runner.js",
+    "core/",
+    "cordis.patch.yml",
+    "README.md",
+    "CHANGELOG.md",
+    "test/regression.mjs",
+    "test/make_fixture.py",
+    "test/fixtures/broken-model.xlsx"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zirscard/dsh-office-audit.git"
+  },
+  "homepage": "https://github.com/zirscard/dsh-office-audit#readme",
+  "bugs": {
+    "url": "https://github.com/zirscard/dsh-office-audit/issues"
+  }
+}
