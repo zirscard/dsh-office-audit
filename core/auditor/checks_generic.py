@@ -73,30 +73,50 @@ def normalize_ref_part(part: str, row: int, col: int) -> str:
 
 
 def normalize_formula(formula: str, row: int, col: int) -> str:
-    try:
-        tokens = Tokenizer(formula).items
-    except Exception:  # noqa: BLE001 - unparsable formula, compare raw
+    tokens = cached_tokens(formula)
+    if tokens is None:  # unparsable formula, compare raw
         return formula
     out = []
-    for token in tokens:
-        if token.type == "OPERAND" and token.subtype == "RANGE":
-            prefix, rest = split_sheet_ref(token.value)
+    for value, ttype, subtype in tokens:
+        if ttype == "OPERAND" and subtype == "RANGE":
+            prefix, rest = split_sheet_ref(value)
             if prefix is not None:
                 head = f"{prefix}!"
             else:
                 head = ""
             pieces = rest.split(":")
             out.append(head + ":".join(normalize_ref_part(p, row, col) for p in pieces))
-        elif token.type == "FUNC":
-            out.append(token.value.rstrip("(") + "(")
+        elif ttype == "FUNC":
+            out.append(value.rstrip("(") + "(")
         else:
-            out.append(token.value)
+            out.append(value)
     return "".join(out)
 
 
 def sheet_exists(model, name: str) -> bool:
     folded = name.casefold()
     return any(existing.casefold() == folded for existing in model.sheet_names)
+
+
+# --- tokenizer cache -------------------------------------------------------
+# Financial models repeat the same formula across dozens of period columns;
+# parsing each distinct formula once instead of per-cell makes reference and
+# consistency checks several times faster on large workbooks.
+_TOKEN_CACHE = {}
+_TOKEN_CACHE_LIMIT = 20_000
+
+
+def cached_tokens(formula):
+    """Tokenize once per distinct formula string; None when unparsable."""
+    if formula in _TOKEN_CACHE:
+        return _TOKEN_CACHE[formula]
+    try:
+        tokens = tuple((t.value, t.type, t.subtype) for t in Tokenizer(formula).items)
+    except Exception:  # noqa: BLE001
+        tokens = None
+    if len(_TOKEN_CACHE) < _TOKEN_CACHE_LIMIT:
+        _TOKEN_CACHE[formula] = tokens
+    return tokens
 
 
 # ---------------------------------------------------------------------------
@@ -114,17 +134,14 @@ def check_formula_errors(model, result, opts):
         return
     errors = {}
     for sheet in model.iter_sheets():
-        for row in range(1, sheet.max_row + 1):
-            for col in range(1, sheet.max_column + 1):
-                if not sheet.is_formula(row, col):
-                    continue
-                value = sheet.value(row, col)
-                if not is_error_value(value):
-                    continue
-                key = value.strip().upper()
-                errors.setdefault(key, []).append(
-                    (sheet.name, cell_ref(row, col), sheet.formula_text(row, col) or "")
-                )
+        for row, col in sheet.formula_cells:
+            value = sheet.value(row, col)
+            if not is_error_value(value):
+                continue
+            key = value.strip().upper()
+            errors.setdefault(key, []).append(
+                (sheet.name, cell_ref(row, col), sheet.formula_text(row, col) or "")
+            )
     for error_value, hits in sorted(errors.items()):
         shown = hits[: opts["max_examples"]]
         evidence = "；".join(f"{sheet}!{cell} {formula}" for sheet, cell, formula in shown)
@@ -146,19 +163,18 @@ def check_broken_references(model, result, opts):
     missing = {}
     external = {}
     scanned = 0
-    for sheet, row, col, cell in model.all_formula_cells():
+    for sheet, row, col in model.all_formula_cells():
         scanned += 1
-        formula = cell.value if is_formula(cell.value) else None
+        formula = sheet.formula_text(row, col)
         if formula is None:
             continue
-        try:
-            tokens = Tokenizer(formula).items
-        except Exception:  # noqa: BLE001
+        tokens = cached_tokens(formula)
+        if tokens is None:
             continue
-        for token in tokens:
-            if token.type != "OPERAND" or token.subtype != "RANGE":
+        for value, ttype, subtype in tokens:
+            if ttype != "OPERAND" or subtype != "RANGE":
                 continue
-            prefix, _rest = split_sheet_ref(token.value)
+            prefix, _rest = split_sheet_ref(value)
             if prefix is None:
                 continue
             if prefix.startswith("["):
@@ -246,18 +262,11 @@ def check_formula_consistency(model, result, opts):
         reported += 1
 
     for sheet in model.iter_sheets():
-        # rows
-        for row in range(1, sheet.max_row + 1):
-            segment = []
-            for col in range(1, sheet.max_column + 1):
-                if sheet.is_formula(row, col):
-                    segment.append((row, col))
-                else:
-                    if segment:
-                        scan_line(sheet, segment, "row")
-                        segment = []
-            if segment:
-                scan_line(sheet, segment, "row")
+        # Row segments come from the shared formula index (one grid pass for
+        # the whole workbook instead of one probe per cell here).
+        for row, runs in sheet.row_segments():
+            for start_col, end_col in runs:
+                scan_line(sheet, [(row, col) for col in range(start_col, end_col + 1)], "row")
 
 
 
@@ -597,16 +606,15 @@ def check_workbook_structure(model, result, opts):
     for sheet in model.iter_sheets():
         if not sheet.has_data():
             continue
-        formulas = 0
+        formulas = len(sheet.formula_cells)
         constants = 0
+        formula_pos = set(sheet.formula_cells)
         for row in range(1, sheet.max_row + 1):
             for col in range(1, sheet.max_column + 1):
-                cell = sheet.formula_cell(row, col)
-                if cell.value is None:
+                if (row, col) in formula_pos:
                     continue
-                if cell.data_type == "f" or is_formula(cell.value):
-                    formulas += 1
-                elif is_number(cell.value):
+                value = sheet.formula_cell(row, col).value
+                if is_number(value):
                     constants += 1
         if formulas == 0 and constants > 20:
             result.add(

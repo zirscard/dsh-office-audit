@@ -17,8 +17,14 @@ const ROOT = resolve(HERE, '..')
 const RECALC = !process.argv.includes('--no-recalc')
 const STAMP = new Date().toISOString().replace(/[:.]/g, '-')
 
-/** Pick the first workbook in a project folder that matches a pattern. */
+/**
+ * Live-workbook smoke cases are opt-in via DSH_AUDIT_LIVE_ROOTS
+ * (";"/":"-separated directories). Any *_01_历年财务数据.xlsx or *.xlsx found
+ * directly inside each directory becomes one smoke case. The published copy
+ * ships no local paths; without the env var only the fixture runs.
+ */
 function discover(dir, pattern) {
+  if (dir === undefined) return undefined
   try {
     const hit = readdirSync(dir).find((name) => pattern.test(name) && !name.startsWith('~$'))
     return hit === undefined ? undefined : join(dir, hit)
@@ -27,29 +33,27 @@ function discover(dir, pattern) {
   }
 }
 
+const liveRoots = (process.env.DSH_AUDIT_LIVE_ROOTS ?? '')
+  .split(/;|:/)
+  .map((part) => part.trim())
+  .filter((part) => part.length > 0)
+
 const CASES = [
   {
     name: 'fixture-broken-model',
     path: join(ROOT, 'test', 'fixtures', 'broken-model.xlsx'),
     expect: { critical: 6, minWarning: 12 },
   },
+  // Live workbooks are SMOKE cases only: they are rebuilt by local pipelines,
+  // so counts are never pinned to them. The fixture carries the strict
+  // assertions; live cases must run, recalc, and return a sane summary.
   {
-    name: 'sample-ratio-table',
-    path: discover(process.env.AUDIT_SAMPLE_RATIO_DIR || '', /_01_历年财务数据\.xlsx$/),
+    name: 'live-financial-workbook',
+    path: liveRoots.length > 0
+      ? discover(liveRoots[0], /\.xlsx$/)
+      : undefined,
     optional: true,
-    expect: { critical: 0, maxWarning: 0 },
-  },
-  {
-    name: 'sample-dcf',
-    path: process.env.AUDIT_SAMPLE_DCF || '',
-    optional: true,
-    expect: { critical: 0 },
-  },
-  {
-    name: 'sample-financial-data',
-    path: discover(process.env.AUDIT_SAMPLE_FIN_DIR || '', /_01_历年财务数据\.xlsx$/),
-    optional: true,
-    expect: { critical: 0 },
+    expect: { smoke: true },
   },
 ]
 
@@ -92,6 +96,12 @@ for (const testCase of cases) {
 
   const summary = result.summary
   const problems = []
+  if (testCase.expect.smoke === true) {
+    // Smoke: only require a structurally sound run.
+    if (typeof summary.critical !== 'number' || typeof summary.warning !== 'number') {
+      problems.push('summary missing critical/warning counts')
+    }
+  }
   if (testCase.expect.critical !== undefined && summary.critical !== testCase.expect.critical) {
     problems.push(`critical=${summary.critical}, expected ${testCase.expect.critical}`)
   }

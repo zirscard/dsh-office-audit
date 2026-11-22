@@ -3,9 +3,7 @@ from __future__ import annotations
 
 import re
 
-from openpyxl.formula import Tokenizer
-
-from .checks_generic import cell_ref
+from .checks_generic import cached_tokens, cell_ref
 from .util import (
     LABELS,
     is_derived_sheet_name,
@@ -364,13 +362,12 @@ def check_ratio_conventions(model, result, opts):
                 formula = sheet.formula_text(row, col)
                 if formula is None:
                     continue
-                try:
-                    tokens = Tokenizer(formula).items
-                except Exception:  # noqa: BLE001
+                tokens = cached_tokens(formula)
+                if tokens is None:
                     continue
-                for token in tokens:
-                    if token.type == "OPERAND" and token.subtype == "NUMBER" and token.value.strip() in YEAR_DAY_LITERALS:
-                        hardcoded.append((row, col, token.value, formula))
+                for value, ttype, subtype in tokens:
+                    if ttype == "OPERAND" and subtype == "NUMBER" and value.strip() in YEAR_DAY_LITERALS:
+                        hardcoded.append((row, col, value, formula))
                         break
         if hardcoded:
             row, col, literal, formula = hardcoded[0]

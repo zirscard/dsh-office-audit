@@ -27,7 +27,7 @@ from auditor.model import WorkbookModel  # noqa: E402
 from auditor.report import render_markdown, write_audit_sheet  # noqa: E402
 from auditor.util import normalize_label  # noqa: E402
 
-ENGINE_VERSION = "0.2.0"
+ENGINE_VERSION = "0.3.0"
 
 GENERIC_CHECKS = [
     "formula-errors",
@@ -107,16 +107,15 @@ def check_list_for(profile: str, requested, verbose=False):
 def sheet_stats(model: WorkbookModel):
     stats = []
     for sheet in model.iter_sheets():
-        formulas = 0
+        formulas = len(sheet.formula_cells)
         constants = 0
+        formula_pos = set(sheet.formula_cells)
         for row in range(1, sheet.max_row + 1):
             for col in range(1, sheet.max_column + 1):
-                cell = sheet.formula_cell(row, col)
-                if cell.value is None:
+                if (row, col) in formula_pos:
                     continue
-                if cell.data_type == "f" or (isinstance(cell.value, str) and cell.value.startswith("=")):
-                    formulas += 1
-                elif isinstance(cell.value, (int, float)) and not isinstance(cell.value, bool):
+                value = sheet.formula_cell(row, col).value
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
                     constants += 1
         period_cols = [
             {"column": col, "period": period[0], "label": _period_label(period)}

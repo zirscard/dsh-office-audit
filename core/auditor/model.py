@@ -172,6 +172,58 @@ class SheetData:
                     counts[col] = counts.get(col, 0) + 1
         return {col for col, n in counts.items() if n >= 3}
 
+    # -- formula index --------------------------------------------------
+    _formula_cells_cache = None
+    _formula_budget = None
+
+    @property
+    def formula_cells(self):
+        """[(row, col)] of every formula cell, built with ONE grid pass.
+
+        Checks used to re-scan the whole grid each (errors, refs, consistency,
+        stats); models repeat the same formula across dozens of columns, so a
+        shared index turns 4-5 full scans into one.
+        """
+        if self._formula_cells_cache is None:
+            out = []
+            budget = self._formula_budget
+            done = False
+            for row in range(1, self.max_row + 1):
+                if done:
+                    break
+                for col in range(1, self.max_column + 1):
+                    cell = self.ws.cell(row=row, column=col)
+                    if cell.data_type == "f" or is_formula(cell.value):
+                        out.append((row, col))
+                        if budget is not None and len(out) >= budget:
+                            done = True
+                            break
+            self._formula_cells_cache = out
+        return self._formula_cells_cache
+
+    def row_segments(self, min_len=1):
+        """Consecutive same-row column runs of formula cells: [(row, [(col, col…)])]."""
+        by_row = {}
+        for row, col in self.formula_cells:
+            by_row.setdefault(row, []).append(col)
+        segments = []
+        for row in sorted(by_row):
+            cols = sorted(by_row[row])
+            runs = []
+            start = prev = cols[0]
+            for col in cols[1:]:
+                if col == prev + 1:
+                    prev = col
+                    continue
+                if prev - start + 1 >= min_len:
+                    runs.append((start, prev))
+                start = prev = col
+            if prev - start + 1 >= min_len:
+                runs.append((start, prev))
+            if runs:
+                segments.append((row, runs))
+        return segments
+
 
 class WorkbookModel:
     def __init__(self, path, recalc_path=None, limits=None):
@@ -184,7 +236,9 @@ class WorkbookModel:
         for name in self.sheet_names:
             ws = self.wb[name]
             wsv = self.wbv[name] if (self.wbv is not None and name in self.wbv.sheetnames) else None
-            self.sheets[name] = SheetData(ws, wsv)
+            sheet = SheetData(ws, wsv)
+            sheet._formula_budget = self.limits["max_formula_scan"]
+            self.sheets[name] = sheet
         self._defined_names = self._collect_defined_names()
 
     def _collect_defined_names(self):
@@ -206,22 +260,7 @@ class WorkbookModel:
             yield self.sheets[name]
 
     def all_formula_cells(self):
-        scanned = 0
+        """(sheet, row, col) tuples from each sheet's shared formula index."""
         for sheet in self.iter_sheets():
-            for row in range(1, sheet.max_row + 1):
-                for col in range(1, sheet.max_column + 1):
-                    cell = sheet.formula_cell(row, col)
-                    if cell.data_type == "f" or is_formula(cell.value):
-                        yield sheet, row, col, cell
-                        scanned += 1
-                        if scanned >= self.limits["max_formula_scan"]:
-                            return
-
-    def count_formulas(self):
-        n = 0
-        for sheet in self.iter_sheets():
-            for row in range(1, sheet.max_row + 1):
-                for col in range(1, sheet.max_column + 1):
-                    if sheet.formula_cell(row, col).data_type == "f":
-                        n += 1
-        return n
+            for row, col in sheet.formula_cells:
+                yield sheet, row, col

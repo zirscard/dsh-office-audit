@@ -10,7 +10,8 @@
  * @module dsh-office-audit/runner
  */
 import { spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { createReadStream, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, unlinkSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, extname, join, resolve } from 'node:path'
 
@@ -133,6 +134,76 @@ function timestamp() {
   return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
 }
 
+/** Content hash of a file (streamed, safe for large workbooks). */
+function sha256File(path) {
+  return new Promise((resolvePromise, reject) => {
+    const hash = createHash('sha256')
+    const stream = createReadStream(path)
+    stream.on('data', (chunk) => hash.update(chunk))
+    stream.on('error', reject)
+    stream.on('end', () => resolvePromise(hash.digest('hex')))
+  })
+}
+
+const RECALC_CACHE_LIMIT = 8
+
+/**
+ * Resolve the recalculated copy for a workbook, using a content-addressed
+ * cache so the audit→fix→re-audit loop does not re-run LibreOffice (the
+ * dominant cost, seconds per call) on an unchanged file.
+ *
+ * Cache layout: <reportDir>/cache/<stem>.recalc-<sha256[0:16]>.xlsx
+ * Invalidation is by content hash — any edit to the workbook misses the cache.
+ * Best effort: any cache problem falls back to a plain recalculation.
+ */
+async function resolveRecalc(workbook, reportDir, stem, tempDir, engineRoot) {
+  let cacheDir
+  try {
+    cacheDir = join(reportDir, 'cache')
+    mkdirSync(cacheDir, { recursive: true })
+  } catch {
+    cacheDir = undefined
+  }
+  if (cacheDir !== undefined) {
+    try {
+      const digest = await sha256File(workbook)
+      const cachePath = join(cacheDir, `${stem}.recalc-${digest.slice(0, 16)}.xlsx`)
+      if (existsSync(cachePath) && statSync(cachePath).size > 0) {
+        return { path: cachePath, recalculated: true, cache: 'hit' }
+      }
+      const recalc = await recalculate(workbook, cachePath, engineRoot)
+      if (recalc.ok) {
+        pruneCache(cacheDir, `${stem}.recalc-`)
+        return { path: cachePath, recalculated: true, cache: 'miss' }
+      }
+      // Failed recalc may have left a partial file; drop it and fall through.
+      try { unlinkSync(cachePath) } catch { /* best effort */ }
+      return { path: undefined, recalculated: false, error: recalc.error }
+    } catch {
+      /* fall back to temp-dir recalc below */
+    }
+  }
+  const fallbackPath = join(tempDir, 'recalculated.xlsx')
+  const recalc = await recalculate(workbook, fallbackPath, engineRoot)
+  if (recalc.ok) return { path: fallbackPath, recalculated: true, cache: 'none' }
+  return { path: undefined, recalculated: false, error: recalc.error }
+}
+
+/** Keep only the newest RECALC_CACHE_LIMIT recalc copies for one stem. */
+function pruneCache(cacheDir, prefix) {
+  try {
+    const entries = readdirSync(cacheDir)
+      .filter((name) => name.startsWith(prefix))
+      .map((name) => ({ name, mtime: statSync(join(cacheDir, name)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime)
+    for (const stale of entries.slice(RECALC_CACHE_LIMIT)) {
+      try { unlinkSync(join(cacheDir, stale.name)) } catch { /* best effort */ }
+    }
+  } catch {
+    /* cache pruning is best effort */
+  }
+}
+
 /**
  * Run a full audit.
  *
@@ -166,13 +237,15 @@ export async function runAudit(options) {
     let recalculated = false
     let recalcNote
     let recalcPath
+    let recalcCache
     if (options.recalculate !== false) {
-      recalcPath = join(tempDir, 'recalculated.xlsx')
-      const recalc = await recalculate(workbook, recalcPath, options.engineRoot)
-      if (recalc.ok) recalculated = true
-      else {
+      const recalc = await resolveRecalc(workbook, reportDir, stem, tempDir, options.engineRoot)
+      if (recalc.recalculated) {
+        recalculated = true
+        recalcPath = recalc.path
+        recalcCache = recalc.cache
+      } else {
         recalcNote = recalc.error
-        recalcPath = undefined
       }
     }
 
@@ -208,6 +281,7 @@ export async function runAudit(options) {
     if (recalcNote !== undefined) payload.recalcNote = recalcNote
     payload.workbook = workbook
     payload.recalculated = recalculated
+    if (recalcCache !== undefined) payload.recalcCache = recalcCache
     payload.report = { markdownPath, jsonPath }
     if (auditWorkbook !== undefined && existsSync(auditWorkbook)) payload.auditWorkbook = auditWorkbook
     // Ensure the on-disk JSON matches what the agent sees.

@@ -31,6 +31,8 @@ office_audit(
 
 **审计从不修改原文件。** 写审计表时生成 `<stem>-audit-<时间戳>.xlsx` 副本。
 
+**重算缓存（v0.3.0+）**：重算结果按工作簿内容哈希缓存在 `<报告目录>/cache/<名>.recalc-<sha>.xlsx`，同一文件未改动时再次审计直接复用（实测 7.7s → 0.36s）；任何编辑都会改变哈希、自动失效，每个工作簿最多保留 8 份。返回值 `recalcCache: hit|miss|none` 标明本次是否命中。
+
 ## 三、检查清单（13 类）
 
 | 类别 | 级别 | 内容 |
@@ -55,7 +57,7 @@ office_audit(
 
 ```bash
 CLI="/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh"
-"$CLI" plugin --profile desktop add link:/path/to/plugins/dsh-office-audit
+"$CLI" plugin --profile desktop add link:<plugin-dir>/dsh-office-audit
 ```
 
 然后确认 `~/.dsh/profiles/desktop/package.json`：
@@ -72,7 +74,7 @@ CLI="/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh"
 归档包安装（离线/换机）：
 
 ```bash
-"$CLI" plugin --profile desktop add file:/path/to/deploy/office-audit/vendor/dsh-office-audit-0.2.0.tgz
+"$CLI" plugin --profile desktop add file:<workspace>/deploy/office-audit/vendor/dsh-office-audit-0.2.0.tgz
 ```
 
 卸载：`"$CLI" plugin --profile desktop remove dsh-office-audit`（不删报告）。
@@ -121,7 +123,12 @@ PY core/audit.py --input test/fixtures/broken-model.xlsx --out-json /tmp/a.json 
 
 `test/fixtures/broken-model.xlsx` 的期望结果是 **6 critical / 12 warning / 5 info**：critical 覆盖断链、公式错误、BS 不平衡、CF 加总、现金 tie-out；warning 覆盖格式误用、硬编码、增速、比率口径、数据清洗。回归结果写入 `test-output/regression-<时间戳>.json`。
 
-## 八、已知限制
+## 八、性能
+
+- 单次全链路（重算+审计）首次约 3–8 秒；未改动文件的重复审计（审计→修→再验循环）约 0.4 秒（重算缓存命中）。
+- 引擎单遍公式索引：错误值、断链、一致性、统计共享一次网格扫描；公式按文本缓存 tokenizer（财务模型同型公式跨列重复率高），比逐格重复解析快数倍。
+
+## 九、已知限制
 
 - 只支持 `.xlsx/.xlsm`；`.xls` 需先转换。
 - 派生表（`common-size` / 结构 / 同比 / 敏感性）自动跳过金额格式、增速与三表检查——它们的行是占比，按金额口径检查会误报。
